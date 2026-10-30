@@ -1,5 +1,7 @@
 __pycache__/
 *.py[cod]
+*.pptx
+*.pdf
 ~$*
 .venv/
 venv/
