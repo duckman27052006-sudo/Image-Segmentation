@@ -15,6 +15,11 @@ MAX_DIM = 420
 
 
 def make_sample():
+    """Tạo ảnh mẫu: vài hình hình học trên nền sáng, thêm nhiễu Gaussian.
+
+    Ảnh mẫu giúp người dùng thử thuật toán ngay mà không cần file ảnh bên ngoài.
+    Nhiễu nhẹ khiến việc chọn ngưỡng trở nên có ý nghĩa (không quá "hoàn hảo").
+    """
     img = Image.new("RGB", (460, 340), (238, 240, 245))
     d = ImageDraw.Draw(img)
     d.ellipse([35, 35, 190, 190], fill=(205, 82, 82))
@@ -23,6 +28,7 @@ def make_sample():
     d.rectangle([55, 235, 185, 320], fill=(232, 186, 70))
     d.polygon([(200, 190), (255, 300), (145, 300)], fill=(150, 110, 195))
 
+    # Cộng nhiễu chuẩn (mean=0, std=7) rồi kẹp về [0, 255].
     arr = np.asarray(img).astype(np.int16)
     rng = np.random.default_rng(7)
     arr = np.clip(arr + rng.normal(0, 7, arr.shape), 0, 255).astype(np.uint8)
@@ -30,22 +36,26 @@ def make_sample():
 
 
 class SegmentationApp:
+    """Lớp giao diện chính của ứng dụng demo phân vùng ảnh."""
+
     def __init__(self, root):
         self.root = root
         self.root.title("Demo phân vùng ảnh - Nở vùng & Gộp vùng")
         self.root.geometry("1200x620")
         self.root.minsize(980, 600)
 
-        self.image = None
-        self.seeds = []
-        self.labels = None
-        self.raw_labels = None
-        self.last_result = None
-        self.photo_orig = None
-        self.photo_result = None
-        self.orig_geom = (1.0, 0, 0)
-        self._resize_job = None
+        # --- Trạng thái dữ liệu ---
+        self.image = None          # ảnh RGB đang thao tác (numpy uint8)
+        self.seeds = []            # danh sách seed người dùng đặt, dạng (x, y)
+        self.labels = None         # label map đang hiển thị (đã áp dụng lấp vùng)
+        self.raw_labels = None     # label map gốc do thuật toán trả về
+        self.last_result = None    # ảnh kết quả đã render để hiển thị/lưu
+        self.photo_orig = None     # ảnh Tkinter của canvas gốc (giữ tham chiếu!)
+        self.photo_result = None   # ảnh Tkinter của canvas kết quả
+        self.orig_geom = (1.0, 0, 0)  # (scale, offset_x, offset_y) khi vẽ ảnh gốc
+        self._resize_job = None    # id của job after() đang chờ khi resize
 
+        # --- Biến gắn với widget điều khiển ---
         self.mode = tk.StringVar(value="grow")
         self.grow_thresh = tk.IntVar(value=25)
         self.connectivity = tk.StringVar(value="8")
@@ -60,9 +70,11 @@ class SegmentationApp:
 
         self._build_style()
         self._build_ui()
+        # Khởi động bằng ảnh mẫu để người dùng thấy ngay giao diện có nội dung.
         self._load_image_array(make_sample(), "Ảnh mẫu")
 
     def _build_style(self):
+        """Thiết lập theme và các style dùng chung cho giao diện."""
         style = ttk.Style()
         try:
             style.theme_use("clam")
@@ -74,9 +86,11 @@ class SegmentationApp:
         style.configure("Sub.TLabel", font=("Segoe UI", 9), foreground="#666666")
 
     def _build_ui(self):
+        """Dựng toàn bộ bố cục: panel điều khiển bên trái, 2 canvas bên phải."""
         self.root.columnconfigure(1, weight=1)
         self.root.rowconfigure(0, weight=1)
 
+        # ===== Panel điều khiển (cột trái) =====
         panel = ttk.Frame(self.root, padding=12)
         panel.grid(row=0, column=0, sticky="nsw")
         panel.columnconfigure(0, weight=1)
@@ -86,6 +100,7 @@ class SegmentationApp:
         ttk.Label(panel, text="Nở vùng & Gộp vùng", style="Sub.TLabel").grid(
             row=1, column=0, sticky="w", pady=(0, 10))
 
+        # Hàng nút chọn ảnh: mở file hoặc dùng ảnh mẫu.
         file_row = ttk.Frame(panel)
         file_row.grid(row=2, column=0, sticky="ew", pady=(0, 10))
         file_row.columnconfigure(0, weight=1)
@@ -102,10 +117,13 @@ class SegmentationApp:
         ttk.Radiobutton(algo, text="Gộp vùng (Split and Merge)", value="merge",
                         variable=self.mode, command=self._on_mode_change).pack(anchor="w")
 
+        # Hai khung tham số chồng cùng một ô; _on_mode_change sẽ ẩn/hiện khung
+        # tương ứng với thuật toán đang chọn.
         self.param_host = ttk.Frame(panel)
         self.param_host.grid(row=4, column=0, sticky="ew")
         self.param_host.columnconfigure(0, weight=1)
 
+        # --- Khung tham số cho Nở vùng ---
         self.grow_frame = ttk.LabelFrame(self.param_host, text="Tham số nở vùng", padding=8)
         self.grow_frame.grid(row=0, column=0, sticky="ew")
         self._add_scale(self.grow_frame, "Ngưỡng tương đồng", self.grow_thresh, 1, 120)
@@ -125,6 +143,7 @@ class SegmentationApp:
                        "cho nhiều vùng. Thuật toán nở dần sang điểm lân cận có màu "
                        "chênh lệch không quá ngưỡng.").pack(anchor="w", pady=(8, 0))
 
+        # --- Khung tham số cho Gộp vùng ---
         self.merge_frame = ttk.LabelFrame(self.param_host, text="Tham số gộp vùng", padding=8)
         self.merge_frame.grid(row=0, column=0, sticky="ew")
         self._add_scale(self.merge_frame, "Ngưỡng tách", self.split_thresh, 2, 100)
@@ -135,6 +154,7 @@ class SegmentationApp:
                        "lớn hơn ngưỡng tách, sau đó các khối kề nhau được gộp lại nếu "
                        "trung bình màu gần nhau.").pack(anchor="w", pady=(8, 0))
 
+        # ===== Hàng nút hành động: chạy / lưu / xóa kết quả =====
         action_row = ttk.Frame(panel)
         action_row.grid(row=5, column=0, sticky="ew", pady=(14, 0))
         action_row.columnconfigure(0, weight=1)
@@ -148,6 +168,7 @@ class SegmentationApp:
         ttk.Label(panel, textvariable=self.status, style="Sub.TLabel",
                   wraplength=235, justify="left").grid(row=6, column=0, sticky="w", pady=(10, 0))
 
+        # ===== Vùng hiển thị ảnh: canvas gốc bên trái, kết quả bên phải =====
         view = ttk.Frame(self.root, padding=(0, 12, 12, 12))
         view.grid(row=0, column=1, sticky="nsew")
         view.columnconfigure(0, weight=1)
@@ -166,6 +187,7 @@ class SegmentationApp:
         self.orig_canvas.bind("<Button-1>", self.on_canvas_click)
         self.orig_canvas.bind("<Configure>", self._on_canvas_resize)
 
+        # Canvas kết quả: có thêm 2 checkbox tô màu vùng / vẽ biên.
         res_box = ttk.LabelFrame(view, text="Kết quả phân vùng", padding=8)
         res_box.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
         res_box.rowconfigure(1, weight=1)
@@ -184,6 +206,11 @@ class SegmentationApp:
         self._on_mode_change()
 
     def _add_scale(self, parent, text, var, from_, to, step=1):
+        """Thêm một slider kèm nhãn tên và giá trị hiện tại.
+
+        `var` là IntVar dùng chung với slider; nhãn giá trị được cập nhật
+        mỗi khi kéo slider.
+        """
         frame = ttk.Frame(parent)
         frame.pack(fill="x", pady=3)
         row = ttk.Frame(frame)
@@ -193,12 +220,14 @@ class SegmentationApp:
         value_label.pack(side="right")
 
         def update(v):
+            # Slider trả về float dạng chuỗi, nên làm tròn về số nguyên.
             value_label.config(text=str(int(round(float(v)))))
 
         ttk.Scale(frame, from_=from_, to=to, variable=var, command=update).pack(
             fill="x", pady=(2, 0))
 
     def _on_mode_change(self):
+        """Ẩn/hiện khung tham số tương ứng với thuật toán đang chọn."""
         if self.mode.get() == "grow":
             self.merge_frame.grid_remove()
             self.grow_frame.grid()
@@ -209,6 +238,11 @@ class SegmentationApp:
             self.view_hint.set("Thuật toán gộp vùng không cần seed")
 
     def _load_image_array(self, array, source):
+        """Nạp mảng ảnh vào ứng dụng và reset toàn bộ trạng thái cũ.
+
+        - Chuyển ảnh xám sang 3 kênh nếu cần.
+        - Thu nhỏ ảnh nếu cạnh dài vượt MAX_DIM để xử lý nhanh.
+        """
         if array.ndim == 2:
             array = np.stack([array] * 3, axis=-1)
         pil = Image.fromarray(array.astype(np.uint8)).convert("RGB")
@@ -217,6 +251,7 @@ class SegmentationApp:
         if scale < 1.0:
             pil = pil.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.LANCZOS)
         self.image = np.asarray(pil)
+        # Ảnh mới thì seed và kết quả cũ không còn ý nghĩa.
         self.seeds = []
         self.labels = None
         self.raw_labels = None
@@ -229,10 +264,12 @@ class SegmentationApp:
         self.status.set(f"Đã nạp {source}: {w}x{h} px.")
 
     def _set_canvas_size(self, canvas, array):
+        """Đặt kích thước canvas bằng kích thước ảnh (đơn vị pixel ảnh)."""
         h, w = array.shape[:2]
         canvas.config(width=w, height=h)
 
     def _canvas_size(self, canvas):
+        """Lấy kích thước hiện tại của canvas, có fallback trước khi widget vẽ xong."""
         cw = canvas.winfo_width()
         ch = canvas.winfo_height()
         if cw <= 1:
@@ -242,6 +279,11 @@ class SegmentationApp:
         return max(cw, 1), max(ch, 1)
 
     def _fit(self, canvas, array):
+        """Thu/phóng ảnh vừa canvas và căn giữa.
+
+        Trả về (PhotoImage, scale, offset_x, offset_y). Bộ ba (scale, ox, oy)
+        cũng là cơ sở để đổi tọa độ chuột sang tọa độ ảnh.
+        """
         cw, ch = self._canvas_size(canvas)
         h, w = array.shape[:2]
         scale = min(cw / w, ch / h, 1.0)
@@ -255,13 +297,16 @@ class SegmentationApp:
         return ImageTk.PhotoImage(pil), scale, ox, oy
 
     def _draw_original(self):
+        """Vẽ ảnh gốc lên canvas trái kèm các seed đã đặt."""
         canvas = self.orig_canvas
         canvas.delete("all")
         if self.image is None:
             return
         self.photo_orig, scale, ox, oy = self._fit(canvas, self.image)
+        # Lưu lại hệ số biến đổi để on_canvas_click đổi ngược tọa độ chuột.
         self.orig_geom = (scale, ox, oy)
         canvas.create_image(ox, oy, anchor="nw", image=self.photo_orig)
+        # Mỗi seed là một vòng tròn đỏ kèm số thứ tự.
         for i, (x, y) in enumerate(self.seeds, start=1):
             px = ox + x * scale
             py = oy + y * scale
@@ -271,6 +316,7 @@ class SegmentationApp:
                                font=("Segoe UI", 9, "bold"))
 
     def _clear_result(self):
+        """Xóa canvas kết quả và hiển thị dòng hướng dẫn mặc định."""
         canvas = self.result_canvas
         canvas.delete("all")
         cw, ch = self._canvas_size(canvas)
@@ -278,6 +324,7 @@ class SegmentationApp:
                            fill="#9aa0a6", font=("Segoe UI", 10))
 
     def _show_result(self):
+        """Vẽ ảnh kết quả (self.last_result) lên canvas phải."""
         if self.last_result is None:
             return
         canvas = self.result_canvas
@@ -286,6 +333,11 @@ class SegmentationApp:
         canvas.create_image(ox, oy, anchor="nw", image=self.photo_result)
 
     def _on_canvas_resize(self, event=None):
+        """Gom nhiều sự kiện resize liên tiếp thành một lần vẽ lại (debounce).
+
+        Việc resize cửa sổ phát sinh rất nhiều sự kiện <Configure>; chờ 60ms
+        rồi mới vẽ lại giúp giao diện không bị giật.
+        """
         if self._resize_job is not None:
             try:
                 self.root.after_cancel(self._resize_job)
@@ -294,6 +346,7 @@ class SegmentationApp:
         self._resize_job = self.root.after(60, self._redraw_display)
 
     def _redraw_display(self):
+        """Vẽ lại cả hai canvas theo kích thước hiện tại."""
         self._resize_job = None
         if self.image is None:
             return
@@ -304,6 +357,7 @@ class SegmentationApp:
             self._clear_result()
 
     def _rerender(self):
+        """Render lại kết quả khi thay đổi tùy chọn tô màu/biên."""
         if self.image is None or self.labels is None:
             return
         self.last_result = render_result(
@@ -313,6 +367,11 @@ class SegmentationApp:
         self._show_result()
 
     def _update_labels(self):
+        """Áp dụng (nếu cần) lấp vùng rồi render lại kết quả.
+
+        `raw_labels` giữ kết quả gốc; `labels` là bản đã xử lý để hiển thị.
+        Tách hai biến giúp bật/tắt lấp vùng mà không phải chạy lại thuật toán.
+        """
         if self.image is None or self.raw_labels is None:
             return
         labels = self.raw_labels
@@ -326,6 +385,7 @@ class SegmentationApp:
         self._show_result()
 
     def _on_fill_toggle(self):
+        """Xử lý khi người dùng bật/tắt checkbox 'Lấp vùng chưa gán'."""
         if self.raw_labels is None:
             return
         self._update_labels()
@@ -340,6 +400,7 @@ class SegmentationApp:
             self.status.set("Đã tắt lấp vùng chưa gán.")
 
     def clear_result(self):
+        """Xóa toàn bộ kết quả phân vùng đang hiển thị."""
         self.labels = None
         self.raw_labels = None
         self.last_result = None
@@ -348,12 +409,15 @@ class SegmentationApp:
         self.status.set("Đã xóa kết quả phân vùng.")
 
     def on_canvas_click(self, event):
+        """Đặt một seed tại vị trí nhấp chuột trên ảnh gốc."""
         if self.image is None:
             return
         h, w = self.image.shape[:2]
         scale, ox, oy = self.orig_geom
+        # Đổi tọa độ màn hình -> tọa độ ảnh bằng cách trừ offset và chia scale.
         x = (event.x - ox) / scale
         y = (event.y - oy) / scale
+        # Bỏ qua nếu nhấp ra ngoài vùng ảnh (phần viền canvas).
         if not (0 <= x < w and 0 <= y < h):
             return
         x, y = int(x), int(y)
@@ -362,28 +426,33 @@ class SegmentationApp:
         self.status.set(f"Đã đặt seed {len(self.seeds)} tại ({x}, {y}).")
 
     def clear_seeds(self):
+        """Xóa tất cả seed đã đặt."""
         self.seeds = []
         self._draw_original()
         self.status.set("Đã xóa tất cả seed.")
 
     def run(self):
+        """Chạy thuật toán đang chọn và hiển thị kết quả."""
         if self.image is None:
             messagebox.showwarning("Chưa có ảnh", "Hãy mở ảnh hoặc dùng ảnh mẫu trước.")
             return
 
         mode = self.mode.get()
+        # Nở vùng bắt buộc phải có seed; gộp vùng thì không.
         if mode == "grow" and not self.seeds:
             messagebox.showwarning(
                 "Chưa có seed",
                 "Hãy nhấp chuột lên ảnh gốc để chọn ít nhất một điểm seed.")
             return
 
+        # Cập nhật trạng thái trước khi chạy để người dùng thấy ứng dụng đang bận.
         self.status.set("Đang xử lý...")
         self.root.update_idletasks()
         t0 = time.perf_counter()
 
         try:
             if mode == "grow":
+                # self.seeds lưu (x, y); thuật toán nhận (y, x) nên hoán đổi.
                 seeds = [(y, x) for x, y in self.seeds]
                 labels = region_growing(self.image, seeds,
                                         self.grow_thresh.get(),
@@ -399,6 +468,7 @@ class SegmentationApp:
             return
 
         elapsed = time.perf_counter() - t0
+        # max() < 0 nghĩa là mọi điểm vẫn là -1: không có vùng nào được tạo.
         if labels.max() < 0:
             self.status.set("Không tạo được vùng nào. Hãy tăng ngưỡng hoặc đổi seed.")
             return
@@ -413,6 +483,7 @@ class SegmentationApp:
         self.status.set(f"Xong: {n_regions} vùng, {elapsed:.2f} giây.{note}")
 
     def open_image(self):
+        """Mở hộp thoại chọn file ảnh và nạp ảnh đó."""
         path = filedialog.askopenfilename(
             title="Chọn ảnh",
             filetypes=[("Ảnh", "*.png *.jpg *.jpeg *.bmp *.tif *.tiff"),
@@ -427,9 +498,11 @@ class SegmentationApp:
         self._load_image_array(np.asarray(pil), os.path.basename(path))
 
     def load_sample(self):
+        """Nạp lại ảnh mẫu."""
         self._load_image_array(make_sample(), "ảnh mẫu")
 
     def save_result(self):
+        """Lưu ảnh kết quả (self.last_result) ra file."""
         if self.last_result is None:
             messagebox.showinfo("Chưa có kết quả", "Hãy chạy phân vùng trước khi lưu.")
             return
